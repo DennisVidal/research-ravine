@@ -1,0 +1,83 @@
+#pragma kernel CSMain
+
+#include "Terrain.hlsl"
+
+#define STEP_SIZE 2.0f
+
+RWStructuredBuffer<int3> neededItemsBuffer;
+RWStructuredBuffer<float3> foundPositionsBuffer;
+
+
+int neededItemCount;
+
+bool IsValueValid(float value)
+{
+    return value < 0.0f;
+}
+
+[numthreads(32,1,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= neededItemCount)
+    {
+        return;
+    }
+    
+    
+    float3 currentPosition = neededItemsBuffer[id.x];
+    
+    bool found = false;
+    for (int l = 0; l < 100 && !found; l++)//while (!found)
+    {
+        float3 start = currentPosition;
+        for (int i = 0; i < 100; i++)
+        {
+            if (IsValueValid(GetTerrainValue(currentPosition)))
+            {
+                start = currentPosition;
+                break;
+            }
+        
+            currentPosition.x += STEP_SIZE;
+        }
+    
+        float3 end = currentPosition;
+        for (int j = 0; j < 50; j++)
+        {
+            if (!IsValueValid(GetTerrainValue(currentPosition)))
+            {
+                currentPosition.x -= STEP_SIZE;
+                end = currentPosition;
+                break;
+            }
+        
+            currentPosition.x += STEP_SIZE;
+        }
+    
+        currentPosition.x = start.x + (end.x - start.x) * 0.5f;
+        
+        
+        float3 pos = currentPosition - STEP_SIZE;
+        bool invalid = false;
+        for (int z = 0; z < 3 && !invalid; z++)
+        {
+            for (int y = 0; y < 3 && !invalid; y++)
+            {
+                for (int x = 0; x < 3 && !invalid; x++)
+                {
+                    if (!IsValueValid(GetTerrainValue(pos + float3(x, y, z) * STEP_SIZE)))
+                    {
+                        invalid = true;
+                    }
+                }
+            }
+        }
+        if (invalid)
+        {
+            currentPosition = end + float3(2.0f * STEP_SIZE, 0.0f, 0.0f);
+            continue;
+        }
+        found = true;
+    }
+    foundPositionsBuffer[id.x] = currentPosition;
+}

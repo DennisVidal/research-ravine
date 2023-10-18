@@ -1,0 +1,85 @@
+#pragma kernel CSMain
+
+#include "Terrain.hlsl"
+
+#define STEP_SIZE 2.0f
+
+RWStructuredBuffer<float3> resultBuffer;
+
+float3 startLocation;
+
+
+bool IsValueValid(float value)
+{
+    return value < 0.0f;
+}
+
+
+[numthreads(1,1,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    float3 currentPosition = startLocation;
+    
+    bool found = false;
+    while(!found)
+    {
+        float3 start = currentPosition;
+        for (int i = 0; i < 1000; i++)
+        {
+            if (IsValueValid(GetTerrainValue(currentPosition)))
+            {
+                start = currentPosition;
+                break;
+            }
+        
+            currentPosition.x += STEP_SIZE;
+        }
+    
+        float3 end = currentPosition;
+        for (int j = 0; j < 50; j++)
+        {
+            if (!IsValueValid(GetTerrainValue(currentPosition)))
+            {
+                currentPosition.x -= STEP_SIZE;
+                end = currentPosition;
+                break;
+            }
+        
+            currentPosition.x += STEP_SIZE;
+        }
+    
+        currentPosition.x = start.x + (end.x - start.x) * 0.5f;
+        
+        
+        float3 pos = currentPosition - STEP_SIZE;
+        bool invalid = false;
+        for (int z = 0; z < 3 && !invalid; z++)
+        {
+            for (int y = 0; y < 3 && !invalid; y++)
+            {
+                for (int x = 0; x < 3 && !invalid; x++)
+                {
+                    if (!IsValueValid(GetTerrainValue(pos + float3(x, y, z) * STEP_SIZE)))
+                    {
+                        invalid = true;
+                    }
+                }
+            }
+        }
+        if (invalid)
+        {
+            currentPosition = end + float3(2.0f*STEP_SIZE, 0.0f, 0.0f);
+            continue;
+        }
+        found = true;
+    }
+    resultBuffer[0] = currentPosition;
+    
+    float gradStepSize = 0.01f;
+    float valueX0 = GetTerrainValue(currentPosition + gradStepSize * float3(-1.0f, 0.0f, 0.0f));
+    float valueX1 = GetTerrainValue(currentPosition + gradStepSize * float3(1.0f, 0.0f, 0.0f));
+    float valueZ0 = GetTerrainValue(currentPosition + gradStepSize * float3(0.0f, 0.0f, -1.0f));
+    float valueZ1 = GetTerrainValue(currentPosition + gradStepSize * float3(0.0f, 0.0f, 1.0f));
+    
+    resultBuffer[1] = normalize(float3(valueZ1 - valueZ0, 0.0f, valueX0 - valueX1));
+}

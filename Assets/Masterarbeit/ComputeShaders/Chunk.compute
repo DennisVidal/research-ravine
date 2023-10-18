@@ -1,0 +1,259 @@
+#pragma kernel Sample
+#pragma kernel Create
+#pragma kernel Connect
+#include "Terrain.hlsl"
+#include "DMC_Table.hlsl"
+
+#define CHUNK_SIZE 32
+#define CHUNK_SIZE_SQUARED 1024
+#define SAMPLE_SIZE 33
+#define SAMPLE_SIZE_SQUARED 1089
+#define ISO_LEVEL 0.0f
+#define SAMPLE_OFFSET float3(0.0143f, 0.0143f, 0.0143f)
+#define SAMPLE_NORMAL_DELTA 0.01f
+
+RWStructuredBuffer<float4> sampleBuffer;
+RWStructuredBuffer<int3x4> edgeGroupBuffer;
+
+RWStructuredBuffer<int> countsBuffer;
+RWStructuredBuffer<float3> vertexBuffer;
+RWStructuredBuffer<float3> normalBuffer;
+RWStructuredBuffer<int> triangleBuffer;
+
+int3 chunkPosition;
+uint chunkSize;
+
+
+
+
+int3 GetSamplePosition(uint idx)
+{   //SAMPLE_SIZE = 33, SAMPLE_SIZE_SQUARED = 1089
+    uint3 localSamplePosition;
+    localSamplePosition.z = idx / SAMPLE_SIZE_SQUARED;
+    uint idxNoZ = idx - (localSamplePosition.z * SAMPLE_SIZE_SQUARED);
+    localSamplePosition.y = idxNoZ / SAMPLE_SIZE;
+    localSamplePosition.x = idxNoZ % SAMPLE_SIZE;
+    return chunkPosition + localSamplePosition * chunkSize;
+}
+
+void AddTerrainSample(uint idx, int3 position)
+{   //SAMPLE_OFFSET = float3(0.0143f, 0.0143f, 0.0143f)
+    float3 samplePosition = position + SAMPLE_OFFSET;
+    float3 offsetX = float3(chunkSize, 0.0f, 0.0f);
+    float3 offsetY = float3(0.0f, chunkSize, 0.0f);
+    float3 offsetZ = float3(0.0f, 0.0f, chunkSize);
+    
+    float value = GetTerrainValue(samplePosition);
+    
+    float3 gradient;
+    gradient.x = GetTerrainValue(samplePosition - offsetX) - GetTerrainValue(samplePosition + offsetX);
+    gradient.y = GetTerrainValue(samplePosition - offsetY) - GetTerrainValue(samplePosition + offsetY);
+    gradient.z = GetTerrainValue(samplePosition - offsetZ) - GetTerrainValue(samplePosition + offsetZ);
+    gradient = normalize(gradient);
+    
+    sampleBuffer[idx] = float4(gradient, value);
+}
+
+
+
+[numthreads(32, 1, 1)]
+void Sample(uint3 id : SV_DispatchThreadID)
+{
+    AddTerrainSample(id.x, GetSamplePosition(id.x));
+    
+    if (id.x == 0)
+    {
+        AddTerrainSample(35936, chunkPosition + (chunkSize * CHUNK_SIZE));
+    }
+}
+
+
+
+
+
+
+
+void GetSamples(uint3 idx, out float4 samples[8])
+{
+    uint3 offset = uint3(1, SAMPLE_SIZE, SAMPLE_SIZE_SQUARED);
+    uint3 idxMin = idx * offset;
+    uint3 idxMax = idxMin + offset;
+    
+    samples[0] = sampleBuffer[idxMin.x + idxMin.y + idxMin.z];
+    samples[1] = sampleBuffer[idxMin.x + idxMin.y + idxMax.z];
+    samples[2] = sampleBuffer[idxMax.x + idxMin.y + idxMax.z];
+    samples[3] = sampleBuffer[idxMax.x + idxMin.y + idxMin.z];
+    samples[4] = sampleBuffer[idxMin.x + idxMax.y + idxMin.z];
+    samples[5] = sampleBuffer[idxMin.x + idxMax.y + idxMax.z];
+    samples[6] = sampleBuffer[idxMax.x + idxMax.y + idxMax.z];
+    samples[7] = sampleBuffer[idxMax.x + idxMax.y + idxMin.z];
+}
+
+uint GetCellCase(float4 samples[8])
+{
+    uint cellCase = 0;
+    for (int i = 0; i < 8; i++)
+    {
+        cellCase |= (samples[i].w < ISO_LEVEL) << i;
+    }
+    return cellCase;
+}
+
+
+int GetNewVertexIndex()
+{
+    int vertexIndex;
+    InterlockedAdd(countsBuffer[0], 1, vertexIndex);
+    return vertexIndex;
+}
+
+void InterpolatePositionAndNormal(uint2 edgeCorners, float4 samples[8], out float3 position, out float3 normal)
+{
+    float3 corner0Position = DMC_CORNER_OFFSETS[edgeCorners.x];
+    float3 corner1Position = DMC_CORNER_OFFSETS[edgeCorners.y];
+    float4 sample0 = samples[edgeCorners.x];
+    float4 sample1 = samples[edgeCorners.y];
+    
+    float factor = (ISO_LEVEL - sample0.w) / (sample1.w - sample0.w);
+    position = corner0Position + (corner1Position - corner0Position) * factor;
+    normal = sample0.xyz + (sample1.xyz - sample0.xyz) * factor;
+}
+
+bool CanAddVertexToEdge(uint3 edgeGroupPosition, uint edgeIndex)
+{
+    bool3 alongMaxBorder = edgeGroupPosition == uint3(CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE);
+    
+    bool3 alongMinBorder = edgeGroupPosition == uint3(0, 0, 0);
+    bool3 invalidBorderEdge = (edgeIndex == uint3(0, 0, 1)) || (edgeIndex == uint3(2, 1, 2));
+    
+    return !(any(alongMinBorder && invalidBorderEdge) || any(alongMaxBorder));
+}
+
+uint GetEdgeGroupIndex(uint3 edgeGroupPosition)
+{
+    return dot(edgeGroupPosition, uint3(1, CHUNK_SIZE, CHUNK_SIZE_SQUARED));
+}
+
+int AddVertexToEdge(uint3 edgeGroupPosition, uint edgeIndex, uint edgeVertexIndex, int vertexIndex)
+{
+    if (vertexIndex == -1)
+    {
+        vertexIndex = GetNewVertexIndex();
+    }
+    uint edgeGroupIndex = GetEdgeGroupIndex(edgeGroupPosition);
+    edgeGroupBuffer[edgeGroupIndex][edgeIndex][edgeVertexIndex] = vertexIndex + 1;
+    return vertexIndex;
+}
+
+int TryAddVertexToEdge(uint3 edgeGroupPosition, uint edgeIndex, uint edgeVertexIndex, int vertexIndex)
+{
+    if (CanAddVertexToEdge(edgeGroupPosition, edgeIndex))
+    {
+        return AddVertexToEdge(edgeGroupPosition, edgeIndex, edgeVertexIndex, vertexIndex);
+    }
+    else
+    {
+        return vertexIndex;
+    }
+}
+
+void TryAddVertexAndNormal(int vertexIndex, float3 vertexPosition, float3 vertexNormal)
+{
+    if (vertexIndex != -1)
+    {
+        vertexBuffer[vertexIndex] = vertexPosition;
+        normalBuffer[vertexIndex] = vertexNormal;
+    }
+}
+
+[numthreads(4, 4, 4)]
+void Create(uint3 id : SV_DispatchThreadID)
+{
+    float4 samples[8];
+    GetSamples(id, samples);
+    uint cellCase = GetCellCase(samples);
+    if (cellCase == 0 || cellCase == 255) { return; }
+    
+    float4 vertexPosition = 0.0f;
+    float3 vertexNormal = 0.0f;
+    int vertexIndex = -1;
+    uint2 edgeTableOffset = DMC_EDGE_TABLE_OFFSETS[cellCase];
+    for (uint offset = edgeTableOffset.x; offset < edgeTableOffset.y; offset++)
+    {
+        uint currentEdge = DMC_EDGE_TABLE[offset];
+        if (currentEdge < 12)
+        {
+            float3 interpolatedPosition;
+            float3 interpolatedNormal;
+            InterpolatePositionAndNormal(DMC_EDGE_CORNERS[currentEdge], samples, interpolatedPosition, interpolatedNormal);
+            vertexPosition += float4(interpolatedPosition, 1.0f);
+            vertexNormal += interpolatedNormal;
+                
+            uint2 edgeAndVertexIndex = DMC_EDGE_VERTEX_INDEX_MAPPING[currentEdge];
+            uint3 edgeGroupPosition = id + DMC_EDGE_OFFSETS[currentEdge];
+            vertexIndex = TryAddVertexToEdge(edgeGroupPosition, edgeAndVertexIndex.x, edgeAndVertexIndex.y, vertexIndex);
+        }
+        else
+        {
+            TryAddVertexAndNormal(vertexIndex, (id + (vertexPosition.xyz / vertexPosition.w)) * chunkSize, normalize(vertexNormal));
+            
+            vertexPosition = 0.0f;
+            vertexNormal = 0.0f;
+            vertexIndex = -1;
+        }
+    }
+    TryAddVertexAndNormal(vertexIndex, (id + (vertexPosition.xyz / vertexPosition.w)) * chunkSize, normalize(vertexNormal));
+}
+
+
+
+
+
+
+
+
+void TryAddQuad(uint4 vertices, uint localEdge, bool flipped)
+{
+    if (!all(vertices))
+    {
+        return;
+    }
+    
+    uint4 actualVertices = vertices - 1;
+    int triangleIndex;
+    InterlockedAdd(countsBuffer[1], 6, triangleIndex);
+    
+    uint idx1 = 1 + flipped;
+    uint idx2 = 2 - flipped;
+    
+    triangleBuffer[triangleIndex] = actualVertices[0];
+    triangleBuffer[triangleIndex + 1] = actualVertices[idx1];
+    triangleBuffer[triangleIndex + 2] = actualVertices[idx2];
+    triangleBuffer[triangleIndex + 3] = actualVertices[3];
+    triangleBuffer[triangleIndex + 4] = actualVertices[idx2];
+    triangleBuffer[triangleIndex + 5] = actualVertices[idx1];
+    
+    //uint4 edgeVertexOrder = DMC_VERTEX_ORDER_TABLE[localEdge][flipped];
+    //uint4 edgeVertexOrder = DMC_VERTEX_ORDER_TABLE[0][flipped];
+    //triangleBuffer[triangleIndex]     = actualVertices[edgeVertexOrder[0]];
+    //triangleBuffer[triangleIndex + 1] = actualVertices[edgeVertexOrder[1]];
+    //triangleBuffer[triangleIndex + 2] = actualVertices[edgeVertexOrder[2]];
+    //triangleBuffer[triangleIndex + 3] = actualVertices[edgeVertexOrder[3]];
+    //triangleBuffer[triangleIndex + 4] = actualVertices[edgeVertexOrder[2]];
+    //triangleBuffer[triangleIndex + 5] = actualVertices[edgeVertexOrder[1]];
+}
+
+
+[numthreads(4, 4, 4)]
+void Connect(uint3 id : SV_DispatchThreadID)
+{
+    uint edgeGroupIndex = GetEdgeGroupIndex(id);
+    uint3x4 edgeGroupData = edgeGroupBuffer[edgeGroupIndex];
+    
+    uint sampleIndex = dot(id, uint3(1, SAMPLE_SIZE, SAMPLE_SIZE_SQUARED));
+    bool flip = sampleBuffer[sampleIndex].w < 0.0f;
+    
+    TryAddQuad(edgeGroupData[0], 0, flip);
+    TryAddQuad(edgeGroupData[1], 1, flip);
+    TryAddQuad(edgeGroupData[2], 2, flip);
+}

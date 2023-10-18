@@ -1,0 +1,807 @@
+#pragma kernel InitCells
+#pragma kernel CreateTriangles
+
+#include "Terrain.hlsl"
+#include "DMC_Table.hlsl"
+
+#define CHUNK_SIZE 32
+#define CHUNK_SAMPLE_SIZE 33
+#define CHUNK_SAMPLE_SIZE_SQUARED 1089
+#define CHUNK_SIZE_MINUS_1 31
+#define ISO_LEVEL 0.0f
+#define SAMPLE_OFFSET 0.0143f
+
+const static int3x3 SEAM_AXIS_MAPPING[7] =
+{ //          x  y  z  x  y  z,  x  y  z
+    { int3x3(0, 0, 1, 0, 1, 0, 1, 0, 0) }, //x
+    { int3x3(1, 0, 0, 0, 0, 1, 0, 1, 0) }, //y
+    { int3x3(0, 0, 1, 0, 0, 0, 1, 1, 0) }, //xy
+    { int3x3(0, 1, 0, 1, 0, 0, 0, 0, 1) }, //z
+    { int3x3(0, 1, 0, 0, 0, 0, 1, 0, 1) }, //xz
+    { int3x3(1, 0, 0, 0, 0, 0, 0, 1, 1) }, //yz
+    { int3x3(0, 0, 0, 0, 0, 0, 1, 1, 1) } //xyz
+};
+
+const static uint CHUNK_INDEX_MAPPING[8] =
+{
+    0, //0     
+    CHUNK_SIZE_MINUS_1 * CHUNK_SIZE_MINUS_1, //961,  +31*31
+    CHUNK_SIZE_MINUS_1 * CHUNK_SIZE_MINUS_1 * 2, //1922, +31*31
+    CHUNK_SIZE_MINUS_1 * CHUNK_SIZE_MINUS_1 * 2 + CHUNK_SIZE_MINUS_1, //1953, +31
+    CHUNK_SIZE_MINUS_1 * CHUNK_SIZE_MINUS_1 * 3 + CHUNK_SIZE_MINUS_1, //2914, +31*31
+    CHUNK_SIZE_MINUS_1 * CHUNK_SIZE_MINUS_1 * 3 + CHUNK_SIZE_MINUS_1 * 2, //2945, +31
+    CHUNK_SIZE_MINUS_1 * CHUNK_SIZE_MINUS_1 * 3 + CHUNK_SIZE_MINUS_1 * 3, //2976, +31
+    CHUNK_SIZE_MINUS_1 * CHUNK_SIZE_MINUS_1 * 3 + CHUNK_SIZE_MINUS_1 * 3 + 1 //2977  +1  
+};
+
+
+const static bool2 VALID_EDGES[7][12] =
+{ //chunk, seam
+    // 0        1        2         3         4         5         6         7         8         9         10        11 
+    { 0, 1,    0, 0,    1, 0,     0, 0,     0, 1,     0, 0,     1, 0,     0, 0,     0, 1,     0, 1,     1, 0,     1, 0 }, //x
+    { 0, 1,    0, 1,    0, 1,     0, 1,     1, 0,     1, 0,     1, 0,     1, 0,     0, 0,     0, 0,     0, 0,     0, 0 }, //y
+    { 0, 1,    0, 0,    1, 0,     0, 0,     1, 0,     1, 0,     1, 0,     1, 0,     0, 0,     0, 0,     1, 0,     1, 0 }, //xy
+    { 0, 0,    1, 0,    0, 0,     0, 1,     0, 0,     1, 0,     0, 0,     0, 1,     0, 1,     1, 0,     1, 0,     0, 1 }, //z
+    { 0, 0,    1, 0,    1, 0,     0, 0,     0, 0,     1, 0,     1, 0,     0, 0,     0, 1,     1, 0,     1, 0,     1, 0 }, //xz
+    { 0, 0,    1, 0,    0, 0,     0, 1,     1, 0,     1, 0,     1, 0,     1, 0,     0, 0,     1, 0,     1, 0,     0, 0 }, //yz
+    { 0, 0,    1, 0,    1, 0,     0, 0,     1, 0,     1, 0,     1, 0,     1, 0,     0, 0,     1, 0,     1, 0,     1, 0 }  //xyz
+};
+
+//const static bool2 VALID_EDGES[7][12] =
+//{ //chunk, seam
+//    // 0        1        2         3         4         5         6         7         8         9         10        11 
+//    { 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0 }, //x
+//    { 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, //y
+//    { 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0 }, //xy
+//    { 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1 }, //z
+//    { 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0 }, //xz
+//    { 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0 }, //yz
+//    { 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0 } //xyz
+//};
+
+const static uint2 SEAM_EDGE_INDICES[12] =
+{
+    uint2(0, 0), //0
+    uint2(0, 1), //1
+    uint2(0, 2), //2
+    uint2(0, 3), //3
+    uint2(1, 0), //4
+    uint2(1, 1), //5
+    uint2(1, 2), //6
+    uint2(1, 3), //7
+    uint2(2, 0), //8
+    uint2(2, 1), //9
+    uint2(2, 2), //10
+    uint2(2, 3) //11
+};
+
+
+struct SeamChunkMeta
+{
+    uint cellOffset;
+    uint chunkDataCount;
+    uint chunkDataOffset;
+    uint minChunkSize;
+    uint mappingArraySize;
+    uint indexMappingOffset;
+};
+struct SeamChunkData
+{
+    int3 position;
+    uint size;
+    uint cellOffset;
+    uint cellsPerAxis;
+};
+
+RWStructuredBuffer<SeamChunkMeta> metaBuffer;
+RWStructuredBuffer<SeamChunkData> dataBuffer;
+RWStructuredBuffer<uint> indexMappingBuffer;
+RWStructuredBuffer<uint3x4> edges;
+RWStructuredBuffer<uint> countsBuffer;
+RWStructuredBuffer<float3> vertexBuffer;
+RWStructuredBuffer<float3> normalBuffer;
+RWStructuredBuffer<uint> triangleBuffer;
+
+int3 chunkPosition;
+int3 maxChunkPosition;
+int3 maxChunkPositionMinusSize;
+uint chunkSize;
+uint totalCellCount;
+
+//////////////////////////////////////////////////
+//Base functions
+//////////////////////////////////////////////////
+
+void GetSamples(int3 samplePosition, uint size, out float4 samples[8])
+{
+    float3 samplePos = samplePosition + SAMPLE_OFFSET;
+        
+    float3 offsetX = float3(size, 0.0f, 0.0f);
+    float3 offsetY = float3(0.0f, size, 0.0f);
+    float3 offsetZ = float3(0.0f, 0.0f, size);
+    
+    for (int i = 0; i < 8; i++)
+    {
+        float3 pos = samplePos + DMC_CORNER_OFFSETS[i] * size;
+        float value = GetTerrainValue(pos);
+        float3 gradient;
+        gradient.x = GetTerrainValue(pos - offsetX) - GetTerrainValue(pos + offsetX);
+        gradient.y = GetTerrainValue(pos - offsetY) - GetTerrainValue(pos + offsetY);
+        gradient.z = GetTerrainValue(pos - offsetZ) - GetTerrainValue(pos + offsetZ);
+        
+        samples[i] = float4(normalize(gradient), value);
+    }
+}
+uint GetCellCase(float4 samples[8])
+{
+    uint cellCase = 0;
+    for (int i = 0; i < 8; i++)
+    {
+        cellCase |= (samples[i].w < ISO_LEVEL) << i;
+    }
+    return cellCase;
+}
+void InterpolatePositionAndNormal(uint2 edgeCorners, float4 samples[8], out float3 position, out float3 normal)
+{
+    float3 corner0Position = DMC_CORNER_OFFSETS[edgeCorners.x];
+    float3 corner1Position = DMC_CORNER_OFFSETS[edgeCorners.y];
+    float4 sample0 = samples[edgeCorners.x];
+    float4 sample1 = samples[edgeCorners.y];
+    
+    float factor = (ISO_LEVEL - sample0.w) / (sample1.w - sample0.w);
+    position = corner0Position + (corner1Position - corner0Position) * factor;
+    normal = sample0.xyz + (sample1.xyz - sample0.xyz) * factor;
+}
+
+uint GetNewVertexIndex()
+{
+    uint vertexIndex;
+    InterlockedAdd(countsBuffer[0], 1, vertexIndex);
+    return vertexIndex;
+}
+void TryAddVertexAndNormal(int vertexIndex, float3 vertexPosition, float3 vertexNormal)
+{
+    if (vertexIndex != -1)
+    {
+        vertexBuffer[vertexIndex] = vertexPosition;
+        normalBuffer[vertexIndex] = vertexNormal;
+    }
+}
+void AddTriangle(int3 vertices, bool flipped)
+{
+    int triangleIndex;
+    InterlockedAdd(countsBuffer[1], 3, triangleIndex);
+    triangleBuffer[triangleIndex] = vertices.x;
+    triangleBuffer[triangleIndex + 1] = flipped ? vertices.z : vertices.y;
+    triangleBuffer[triangleIndex + 2] = flipped ? vertices.y : vertices.z;
+}
+void TryAddTriangle(int3 vertices, bool flipped)
+{
+    if (all(vertices) && all(vertices != vertices.yzx))
+    {
+        AddTriangle(vertices - 1, flipped);
+    }
+}
+
+bool IsEdgeValid(uint metaOrChunkIndex, uint currentEdge, bool isSeamCell)
+{
+    return VALID_EDGES[metaOrChunkIndex][currentEdge][isSeamCell];
+}
+
+
+//////////////////////////////////////////////////
+//Chunk functions
+//////////////////////////////////////////////////
+uint GetChunkIndex(uint idx)
+{
+    uint chunkIndex = 0;
+    for (int i = 1; i < 7; i++)
+    {
+        chunkIndex += idx >= CHUNK_INDEX_MAPPING[i];
+    }
+    return chunkIndex;
+}
+uint GetChunkIndex(int3 cellPosition)
+{
+    return dot(cellPosition == maxChunkPositionMinusSize, int3(1, 2, 4)) - 1;
+}
+
+int3 GetChunkCellPosition(uint idx, uint chunkIndex)
+{
+    uint localIndex = idx - CHUNK_INDEX_MAPPING[chunkIndex];
+    int3x3 axisMapping = SEAM_AXIS_MAPPING[chunkIndex];
+    int3 cellOffset = axisMapping[0] * (localIndex % CHUNK_SIZE_MINUS_1);
+    cellOffset += axisMapping[1] * (localIndex / CHUNK_SIZE_MINUS_1);
+    cellOffset *= chunkSize;
+    cellOffset += axisMapping[2] * (maxChunkPositionMinusSize - chunkPosition);
+    return chunkPosition + cellOffset;
+}
+int3 GetChunkCellPosition(uint idx)
+{
+    return GetChunkCellPosition(idx, GetChunkIndex(idx));
+}
+
+uint GetChunkCellIndex(int3 cellPosition, uint chunkIndex)
+{
+    int3 localPosition = (cellPosition - chunkPosition) / chunkSize;
+    int3x3 axisMapping = SEAM_AXIS_MAPPING[chunkIndex];
+    uint indexOffset = dot(axisMapping[0], localPosition);
+    indexOffset += dot(axisMapping[1], localPosition) * CHUNK_SIZE_MINUS_1;
+    return CHUNK_INDEX_MAPPING[chunkIndex] + indexOffset;
+}
+uint GetChunkCellIndex(int3 cellPosition)
+{
+    return GetChunkCellIndex(cellPosition, GetChunkIndex(cellPosition));
+}
+
+
+//////////////////////////////////////////////////
+//Seamchunk functions
+//////////////////////////////////////////////////
+uint GetSeamChunkMetaIndex(uint idx)
+{
+    uint metaIndex = 0;
+    for (int i = 1; i < 6; i++)
+    {
+        metaIndex += idx >= metaBuffer[i].cellOffset;
+    }
+    return metaIndex;
+}
+uint GetSeamChunkMetaIndex(int3 cellPosition)
+{
+    return dot(cellPosition == maxChunkPosition, int3(1, 2, 4)) - 1;
+}
+
+SeamChunkMeta GetSeamChunkMeta(uint metaIndex)
+{
+    return metaBuffer[metaIndex];
+}
+
+SeamChunkData GetSeamChunkData(uint idx, uint metaIndex)
+{
+    SeamChunkMeta meta = GetSeamChunkMeta(metaIndex);
+    uint dataOffset = meta.chunkDataOffset;
+    uint endDataOffset = dataOffset + meta.chunkDataCount;
+    for (uint i = dataOffset + 1; i < endDataOffset; i++)
+    {
+        dataOffset += idx >= dataBuffer[i].cellOffset;
+    }
+    return dataBuffer[dataOffset];
+}
+
+SeamChunkData GetSeamChunkData(uint idx)
+{
+    return GetSeamChunkData(idx, GetSeamChunkMetaIndex(idx));
+}
+SeamChunkData GetSeamChunkData(int3 position, uint metaIndex, SeamChunkMeta meta)
+{
+    if (meta.chunkDataCount != 0)
+    {
+        int3x3 axisMapping = SEAM_AXIS_MAPPING[metaIndex];
+        int3 seamStartPosition = chunkPosition + axisMapping[2] * chunkSize * CHUNK_SIZE;
+        int3 localPosition = (position - seamStartPosition) / (meta.minChunkSize * CHUNK_SIZE);
+        uint indexMappingOffset = meta.indexMappingOffset;
+        indexMappingOffset += dot(axisMapping[0], localPosition);
+        indexMappingOffset += dot(axisMapping[1], localPosition) * meta.mappingArraySize;
+        return dataBuffer[meta.chunkDataOffset + indexMappingBuffer[indexMappingOffset]];
+    }
+    else
+    {
+        //Explicitly setting values might not be necessary
+        SeamChunkData data;
+        data.cellOffset = 0;
+        data.size = 0;
+        data.cellsPerAxis = 0;
+        data.position = 0;
+        return data;
+    }
+}
+SeamChunkData GetSeamChunkData(int3 position, uint metaIndex)
+{
+    return GetSeamChunkData(position, metaIndex, GetSeamChunkMeta(metaIndex));
+}
+SeamChunkData GetSeamChunkData(int3 position)
+{
+    return GetSeamChunkData(position, GetSeamChunkMetaIndex(position));
+}
+
+uint GetSeamCellIndex(int3 cellPosition, uint metaIndex, SeamChunkData data)
+{
+    int3 localPosition = (cellPosition - data.position) / data.size;
+    int3x3 axisMapping = SEAM_AXIS_MAPPING[metaIndex];
+    uint indexOffset = dot(axisMapping[0], localPosition);
+    indexOffset += dot(axisMapping[1], localPosition) * data.cellsPerAxis;
+    return data.cellOffset + indexOffset;
+}
+uint GetSeamCellIndex(int3 cellPosition, uint metaIndex)
+{
+    return GetSeamCellIndex(cellPosition, metaIndex, GetSeamChunkData(cellPosition, metaIndex));
+}
+uint GetSeamCellIndex(int3 cellPosition)
+{
+    return GetSeamCellIndex(cellPosition, GetSeamChunkMetaIndex(cellPosition));
+}
+
+
+
+//////////////////////////////////////////////////
+//General functions
+//////////////////////////////////////////////////
+bool IsSeamCell(uint idx)
+{
+    return !(idx < 2977);
+}
+bool IsSeamCell(int3 cellPosition)
+{
+    return any(cellPosition == maxChunkPosition);
+}
+
+uint GetMetaOrChunkIndex(uint idx, bool isSeamCell)
+{
+    return isSeamCell ? GetSeamChunkMetaIndex(idx) : GetChunkIndex(idx);
+}
+
+int3 GetCellPosition(uint idx, uint metaOrChunkIndex, SeamChunkData data, bool isSeamCell)
+{
+    uint localIndex = idx - data.cellOffset;
+    int3x3 axisMapping = SEAM_AXIS_MAPPING[metaOrChunkIndex];
+    int3 positionOffset = axisMapping[0] * (localIndex % data.cellsPerAxis);
+    positionOffset += axisMapping[1] * (localIndex / data.cellsPerAxis);
+    return data.position + positionOffset * data.size;
+}
+
+SeamChunkData GetBaseChunkData(uint chunkIndex)
+{
+    SeamChunkData data;
+    data.cellOffset = CHUNK_INDEX_MAPPING[chunkIndex];
+    data.position = chunkPosition + SEAM_AXIS_MAPPING[chunkIndex][2] * chunkSize * CHUNK_SIZE_MINUS_1;
+    data.size = chunkSize;
+    data.cellsPerAxis = CHUNK_SIZE_MINUS_1; // CHUNK_SIZE_MINUS_1 -30 * (chunkIndex == 7); //Not needed as axisMapping for chunkIndex 7 results in no offset anyways
+    return data;
+}
+SeamChunkData GetData(uint idx, bool isSeamCell, uint metaOrChunkIndex)
+{
+    if (isSeamCell)
+    {
+        return GetSeamChunkData(idx, metaOrChunkIndex);
+    }
+    else
+    {
+        return GetBaseChunkData(metaOrChunkIndex);
+    }
+}
+
+int TryAddVertexToEdge(uint idx, uint metaOrChunkIndex, uint currentEdge, bool isSeamCell, int vertexIndex)
+{
+    if (IsEdgeValid(metaOrChunkIndex, currentEdge, isSeamCell))
+    {
+        if (vertexIndex == -1)
+        {
+            vertexIndex = GetNewVertexIndex();
+        }
+        
+        uint2 edgeIndices = SEAM_EDGE_INDICES[currentEdge];
+        edges[idx][edgeIndices.x][edgeIndices.y] = vertexIndex + 1;
+        //edges[idx] += (edges[idx] == 0) * (vertexIndex + 1);
+        //edges[idx] = vertexIndex + 1;
+    }
+    
+    return vertexIndex;
+}
+
+
+
+
+
+
+
+//////////////////////////////////////////////////
+//Pass 1
+//////////////////////////////////////////////////
+void InitCell(uint idx)
+{
+    //Base cell information
+    bool isSeamCell = IsSeamCell(idx);
+    uint metaOrChunkIndex = GetMetaOrChunkIndex(idx, isSeamCell);
+    SeamChunkData data = GetData(idx, isSeamCell, metaOrChunkIndex);
+    int3 cellPosition = GetCellPosition(idx, metaOrChunkIndex, data, isSeamCell);
+    
+    //Sample corners and get cell case
+    float4 samples[8];
+    GetSamples(cellPosition, data.size, samples);
+    uint cellCase = GetCellCase(samples);
+    if (cellCase == 0 || cellCase == 255)
+    {
+        return;
+    }
+    
+    //Add vertices
+    int3 localPosition = cellPosition - chunkPosition;
+    float4 vertexPosition = 0.0f;
+    float3 vertexNormal = 0.0f;
+    int vertexIndex = -1;
+    
+    
+    uint2 edgeTableOffset = DMC_EDGE_TABLE_OFFSETS[cellCase];
+    for (uint offset = edgeTableOffset.x; offset < edgeTableOffset.y; offset++)
+    {
+        uint currentEdge = DMC_EDGE_TABLE[offset];
+        if (currentEdge < 12)
+        {
+            float3 interpolatedPosition;
+            float3 interpolatedNormal;
+            InterpolatePositionAndNormal(DMC_EDGE_CORNERS[currentEdge], samples, interpolatedPosition, interpolatedNormal);
+            vertexPosition += float4(interpolatedPosition, 1.0f);
+            vertexNormal += interpolatedNormal;
+            
+            vertexIndex = TryAddVertexToEdge(idx, metaOrChunkIndex, currentEdge, isSeamCell, vertexIndex);
+        }
+        else
+        {
+            TryAddVertexAndNormal(vertexIndex, localPosition + (vertexPosition.xyz / vertexPosition.w) * data.size, normalize(vertexNormal));
+            vertexPosition = 0.0f;
+            vertexNormal = 0.0f;
+            vertexIndex = -1;
+        }
+    }
+    TryAddVertexAndNormal(vertexIndex, localPosition + (vertexPosition.xyz / vertexPosition.w) * data.size, normalize(vertexNormal));
+    
+    edges[idx][isSeamCell][isSeamCell] = samples[!isSeamCell * 6].w < ISO_LEVEL;
+}
+
+[numthreads(32, 1, 1)]
+void InitCells(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x < totalCellCount)
+    {
+        InitCell(id.x);
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+//////////////////////////////////////////////////
+//Pass 2
+//////////////////////////////////////////////////
+uint GetEdgeVertex(uint3x4 edgeData, uint edge)
+{
+    uint2 indices = SEAM_EDGE_INDICES[edge];
+    return edgeData[indices.x][indices.y];
+}
+
+bool IsSeamCellCornerOutside(int3x4 seamCellEdgeData)
+{
+    return GetEdgeVertex(seamCellEdgeData, 5);
+}
+bool IsChunkCellCornerOutside(int3x4 chunkCellEdgeData)
+{
+    return GetEdgeVertex(chunkCellEdgeData, 0);
+}
+
+int3 GetActualSeamCellPosition(SeamChunkData data, int3 closestSeamChunkPosition)
+{
+    int3 offset = (closestSeamChunkPosition - data.position) / data.size;
+    return data.position + data.size * offset;
+}
+
+uint2 GetCellVertices(uint2 vertices0, uint2 vertices1)
+{
+    vertices0 = vertices0.x > vertices0.y ? vertices0.yx : vertices0;
+    vertices1 = vertices1.x > vertices1.y ? vertices1.yx : vertices1;
+    
+    uint2 cellVertices;
+    cellVertices.x = vertices0.x + (vertices0.x == 0) * vertices0.y;
+    cellVertices.y = vertices1.y + (vertices1.y == 0) * vertices1.x;
+    return cellVertices;
+}
+
+
+void AddSubCellTriangles(uint seamCellRatio, int3 seamCellsStartPosition, int2x3 seamCellOffsets, uint2 chunkCellVertices, uint4 seamEdges)
+{
+    if (seamCellRatio <= 1) { return; }
+    
+    uint ratioMinus1 = seamCellRatio - 1;
+    for (uint k = 0; k < seamCellRatio; k++)
+    {
+        for (uint j = 0; j < seamCellRatio; j++)
+        {
+            int3 cellPosition = seamCellsStartPosition + k * seamCellOffsets[0] + j * seamCellOffsets[1];
+            uint3x4 seamCellEdgeData = edges[GetSeamCellIndex(cellPosition)];
+            
+            if (k < ratioMinus1)
+            {
+                uint3x4 nextSeamCellEdgeData = edges[GetSeamCellIndex(cellPosition + seamCellOffsets[0])];
+                
+                int2 seamVertices;
+                seamVertices.x = GetEdgeVertex(nextSeamCellEdgeData, seamEdges.x);
+                seamVertices.y = GetEdgeVertex(seamCellEdgeData, seamEdges.y);
+                    
+                bool flip = IsSeamCellCornerOutside(nextSeamCellEdgeData);
+                TryAddTriangle(int3(chunkCellVertices.x, seamVertices), flip);
+                if (chunkCellVertices.x != chunkCellVertices.y)
+                {
+                    TryAddTriangle(int3(chunkCellVertices.y, seamVertices), flip);
+                }
+            }
+            
+            if (j < ratioMinus1)
+            {
+                uint3x4 nextSeamCellEdgeData = edges[GetSeamCellIndex(cellPosition + seamCellOffsets[1])];
+                
+                int2 seamVertices;
+                seamVertices.x = GetEdgeVertex(nextSeamCellEdgeData, seamEdges.z);
+                seamVertices.y = GetEdgeVertex(seamCellEdgeData, seamEdges.w);
+                
+                bool flip = !IsSeamCellCornerOutside(nextSeamCellEdgeData);
+                TryAddTriangle(int3(chunkCellVertices.y, seamVertices), flip);
+                if (chunkCellVertices.x != chunkCellVertices.y)
+                {
+                    TryAddTriangle(int3(chunkCellVertices.x, seamVertices), flip);
+                }
+            }
+        }
+    }
+}
+
+void ConnectToTriangles(int3 chunkCellPosition, uint3x4 cellEdgeData, int3x3 axisMapping, uint2x4 edgeConnections)
+{
+    uint4 chunkEdges = edgeConnections[0];
+    uint4 seamEdges = edgeConnections[1];
+    int3x3 chunkCellOffsets = axisMapping * chunkSize;
+    int3 closestSeamChunkPosition = chunkCellPosition + chunkCellOffsets[2];
+    
+    SeamChunkData seamChunkData = GetSeamChunkData(closestSeamChunkPosition);
+    if (seamChunkData.size == 0)
+    {
+        return;
+    }
+    
+    int3 seamCellsStartPosition = GetActualSeamCellPosition(seamChunkData, closestSeamChunkPosition);
+    int2x3 seamCellOffsets = int2x3(axisMapping[0], axisMapping[1]) * seamChunkData.size;
+    uint2x2 chunkCellVertices;
+    chunkCellVertices[0] = uint2(GetEdgeVertex(cellEdgeData, chunkEdges.x), GetEdgeVertex(cellEdgeData, chunkEdges.y));
+    chunkCellVertices[1] = uint2(GetEdgeVertex(cellEdgeData, chunkEdges.z), GetEdgeVertex(cellEdgeData, chunkEdges.w));
+    uint2 chunkCellVertices2 = GetCellVertices(chunkCellVertices[0], chunkCellVertices[1]);
+    
+    uint seamCellRatio = max(chunkSize / seamChunkData.size, 1);
+    AddSubCellTriangles(seamCellRatio, seamCellsStartPosition, seamCellOffsets, chunkCellVertices2, seamEdges);
+    
+    
+    for (uint k = 0; k < 2; k++)
+    {
+        int3 nextChunkCellPosition = chunkCellPosition + chunkCellOffsets[k];
+        int3 nextClosestSeamChunkPosition = nextChunkCellPosition + chunkCellOffsets[2];
+        SeamChunkData nextSeamChunkData = GetSeamChunkData(nextClosestSeamChunkPosition);
+        
+        if (nextSeamChunkData.size == 0)
+        {
+            continue;
+        }
+        
+        int3 seamCellPosition = seamCellsStartPosition + seamCellOffsets[k] * (seamCellRatio - 1);
+        int3 nextSeamCellsPosition = GetActualSeamCellPosition(nextSeamChunkData, nextClosestSeamChunkPosition);
+        int3 seamCellOffset = nextSeamChunkData.size * axisMapping[1 - k];
+        uint nextSeamCellRatio = max(seamChunkData.size / nextSeamChunkData.size, 1);
+        uint nextChunkCellVertex = IsSeamCell(nextChunkCellPosition) ? 0 : GetEdgeVertex(edges[GetChunkCellIndex(nextChunkCellPosition)], chunkEdges[2 * k]);
+        for (uint i = 0; i < seamCellRatio; i++)
+        {
+            uint3x4 seamCellEdgeData = edges[GetSeamCellIndex(seamCellPosition)];
+            uint2x2 seamCellVertices;
+            seamCellVertices[0] = uint2(GetEdgeVertex(seamCellEdgeData, seamEdges.x), GetEdgeVertex(seamCellEdgeData, seamEdges.y));
+            seamCellVertices[1] = uint2(GetEdgeVertex(seamCellEdgeData, seamEdges.z), GetEdgeVertex(seamCellEdgeData, seamEdges.w));
+            uint2 seamCellVertices2 = GetCellVertices(seamCellVertices[0], seamCellVertices[1]);
+            for (uint j = 0; j < nextSeamCellRatio; j++)
+            {
+                int3 nextSeamCellPosition = nextSeamCellsPosition + j * seamCellOffset;
+                uint3x4 nextSeamCellEdgeData = edges[GetSeamCellIndex(nextSeamCellPosition)];
+                uint nextSeamCellVertex = GetEdgeVertex(nextSeamCellEdgeData, seamEdges[2 * k]);
+                
+                bool flip = seamCellRatio == 1 ? !IsChunkCellCornerOutside(cellEdgeData) : IsSeamCellCornerOutside(nextSeamCellEdgeData);
+                flip = (k == 0) * flip + (k == 1) * !flip;
+                
+                if (all(nextSeamCellPosition == seamCellPosition))
+                {
+                    nextSeamCellVertex = seamCellVertices2[k] + (seamCellVertices2[k] == 0) * seamCellVertices2[1 - k];
+                }
+                
+                TryAddTriangle(int3(chunkCellVertices[k].y, nextSeamCellVertex, seamCellVertices[k].y), flip);
+                TryAddTriangle(int3(chunkCellVertices[k].y, nextChunkCellVertex, nextSeamCellVertex), flip);
+                
+            }
+            seamCellPosition += seamCellOffsets[1 - k];
+            nextSeamCellsPosition += ((((i + 1) * seamChunkData.size) % nextSeamChunkData.size) == 0) * nextSeamCellRatio * seamCellOffset;
+        }
+
+    }
+}
+
+void CreateCellTriangles(uint idx)
+{
+    uint chunkIndex = GetChunkIndex(idx);
+    int3 cellPosition = GetChunkCellPosition(idx, chunkIndex);
+    uint3x4 cellEdgeData = edges[idx];
+    uint2x4 edgesConnections;
+    
+    uint chunkCode = chunkIndex + 1;
+    if ((chunkCode & 1) != 0)
+    {
+        edgesConnections = uint2x4(11, 10, 2, 6, 8, 9, 0, 4);
+        ConnectToTriangles(cellPosition, cellEdgeData, SEAM_AXIS_MAPPING[0], edgesConnections);
+    }
+    if ((chunkCode & 2) != 0)
+    {
+        edgesConnections = uint2x4(4, 6, 7, 5, 0, 2, 3, 1);
+        ConnectToTriangles(cellPosition, cellEdgeData, SEAM_AXIS_MAPPING[1], edgesConnections);
+    }
+    if ((chunkCode & 4) != 0)
+    {
+        edgesConnections = uint2x4(1, 5, 9, 10, 3, 7, 8, 11);
+        ConnectToTriangles(cellPosition, cellEdgeData, SEAM_AXIS_MAPPING[3], edgesConnections);
+    }
+}
+
+
+[numthreads(32, 1, 1)]
+void CreateTriangles(uint3 id : SV_DispatchThreadID)
+{
+    //2977/32 => 93*32 + 1 times
+    CreateCellTriangles(id.x);
+    if (id.x == 0)
+    {
+        CreateCellTriangles(2976);
+    }
+}
+
+
+/*
+int3 GetSeamCellPosition(uint idx, uint metaIndex, SeamChunkData data)
+{
+    uint localIndex = idx - data.cellOffset;
+    int3x3 axisMapping = SEAM_AXIS_MAPPING[metaIndex];
+    return data.position + data.size * (axisMapping[0] * (localIndex % data.cellsPerAxis) + axisMapping[1] * (localIndex / data.cellsPerAxis));
+}
+int3 GetSeamCellPosition(uint idx, uint metaIndex)
+{
+    return GetSeamCellPosition(idx, metaIndex, GetSeamChunkData(idx, metaIndex));
+}
+int3 GetSeamCellPosition(uint idx)
+{
+    return GetSeamCellPosition(idx, GetSeamChunkMetaIndex(idx));
+}
+*/
+
+/*
+uint GetCellIndex(int3 cellPosition, bool isSeamCell)
+{
+    return isSeamCell ? GetSeamCellIndex(cellPosition) : GetChunkCellIndex(cellPosition);
+}
+uint GetCellIndex(int3 cellPosition, uint metaOrChunkIndex, SeamChunkData data)
+{
+    int3 localPosition = (cellPosition - data.position) / data.size;
+    int3x3 axisMapping = SEAM_AXIS_MAPPING[metaOrChunkIndex];
+    uint localOffset = dot(axisMapping[0], localPosition);
+    localOffset += dot(axisMapping[1], localPosition) * data.cellsPerAxis;
+    return data.cellOffset + localOffset;
+}
+*/
+
+
+/*
+void ConnectToTriangles(int3 chunkCellPosition, uint3x4 cellEdgeData, int3x3 axisMapping, uint2x4 edgeConnections)
+{
+    uint4 chunkEdges = edgeConnections[0];
+    uint4 seamEdges = edgeConnections[1];
+    int3x3 chunkCellOffsets = axisMapping * chunkSize;
+    int3 closestSeamChunkPosition = chunkCellPosition + chunkCellOffsets[2];
+    
+    SeamChunkData seamChunkData = GetSeamChunkData(closestSeamChunkPosition);
+    if (seamChunkData.size == 0)
+    {
+        return;
+    }
+    
+    int3 seamCellsStartPosition = GetActualSeamCellPosition(seamChunkData, closestSeamChunkPosition);
+    int2x3 seamCellOffsets = int2x3(axisMapping[0], axisMapping[1]) * seamChunkData.size;
+    
+    uint2 chunkCellVertices0 = uint2(GetEdgeVertex(cellEdgeData, chunkEdges.x), GetEdgeVertex(cellEdgeData, chunkEdges.y));
+    uint2 chunkCellVertices1 = uint2(GetEdgeVertex(cellEdgeData, chunkEdges.z), GetEdgeVertex(cellEdgeData, chunkEdges.w));
+    uint2 chunkCellVertices = GetCellVertices(chunkCellVertices0, chunkCellVertices1);
+    
+    uint seamCellRatio = max(chunkSize / seamChunkData.size, 1);
+    AddSubCellTriangles(seamCellRatio, seamCellsStartPosition, seamCellOffsets, chunkCellVertices, seamEdges);
+    
+    int3 nextChunkCellPosition0 = chunkCellPosition + chunkCellOffsets[0];
+    int3 closestSeamChunkPosition0 = nextChunkCellPosition0 + chunkCellOffsets[2];
+    SeamChunkData seamChunkData0 = GetSeamChunkData(closestSeamChunkPosition0);
+    if (seamChunkData0.size != 0)
+    {
+        int3 seamCellPosition0 = seamCellsStartPosition + seamCellOffsets[0] * (seamCellRatio - 1);
+        int3 initialSeamCellsPosition0 = GetActualSeamCellPosition(seamChunkData0, closestSeamChunkPosition0);
+        int3 seamCellOffset0 = seamChunkData0.size * axisMapping[1];
+        uint seamCellRatio0 = max(seamChunkData.size / seamChunkData0.size, 1);
+        
+        uint nextChunkCellVertex = IsSeamCell(nextChunkCellPosition0) ? 0 : GetEdgeVertex(edges[GetChunkCellIndex(nextChunkCellPosition0)], chunkEdges.x);
+        
+        
+        for (uint i = 0; i < seamCellRatio; i++)
+        {
+            uint3x4 seamCellEdgeData = edges[GetSeamCellIndex(seamCellPosition0)];
+            uint2 seamCellVertices0 = uint2(GetEdgeVertex(seamCellEdgeData, seamEdges.x), GetEdgeVertex(seamCellEdgeData, seamEdges.y));
+            uint2 seamCellVertices1 = uint2(GetEdgeVertex(seamCellEdgeData, seamEdges.z), GetEdgeVertex(seamCellEdgeData, seamEdges.w));
+            uint2 seamCellVertices = GetCellVertices(seamCellVertices0, seamCellVertices1);
+            for (uint j = 0; j < seamCellRatio0; j++)
+            {
+                int3 nextSeamCellPosition0 = initialSeamCellsPosition0 + j * seamCellOffset0;
+                uint3x4 seamCellEdgeData0 = edges[GetSeamCellIndex(nextSeamCellPosition0)];
+                uint nextSeamCellVertex = GetEdgeVertex(seamCellEdgeData0, seamEdges.x);
+                
+                bool flip = seamCellRatio == 1 ? !IsChunkCellCornerOutside(cellEdgeData) : IsSeamCellCornerOutside(seamCellEdgeData0);
+                if (all(nextSeamCellPosition0 == seamCellPosition0))
+                {
+                    nextSeamCellVertex = seamCellVertices.x + (seamCellVertices.x == 0) * seamCellVertices.y;
+                }
+                
+                TryAddTriangle(int3(chunkCellVertices0.y, nextSeamCellVertex, seamCellVertices0.y), flip);
+                TryAddTriangle(int3(chunkCellVertices0.y, nextChunkCellVertex, nextSeamCellVertex), flip);
+            }
+            
+            seamCellPosition0 += seamCellOffsets[1];
+            initialSeamCellsPosition0 += ((((i + 1) * seamChunkData.size) % seamChunkData0.size) == 0) * seamCellRatio0 * seamCellOffset0;
+        }
+    }
+    
+    int3 nextChunkCellPosition1 = chunkCellPosition + chunkCellOffsets[1];
+    int3 closestSeamChunkPosition1 = nextChunkCellPosition1 + chunkCellOffsets[2];
+    SeamChunkData seamChunkData1 = GetSeamChunkData(closestSeamChunkPosition1);
+    if (seamChunkData1.size != 0)
+    {
+        int3 seamCellPosition1 = seamCellsStartPosition + seamCellOffsets[1] * (seamCellRatio - 1);
+        int3 initialSeamCellsPosition1 = GetActualSeamCellPosition(seamChunkData1, closestSeamChunkPosition1);
+        int3 seamCellOffset1 = seamChunkData1.size * axisMapping[0];
+        uint seamCellRatio1 = max(seamChunkData.size / seamChunkData1.size, 1);
+        
+        uint nextChunkCellVertex = IsSeamCell(nextChunkCellPosition1) ? 0 : GetEdgeVertex(edges[GetChunkCellIndex(nextChunkCellPosition1)], chunkEdges.z);
+        
+        for (uint i = 0; i < seamCellRatio; i++)
+        {
+            uint3x4 seamCellEdgeData = edges[GetSeamCellIndex(seamCellPosition1)];
+            uint2 seamCellVertices0 = uint2(GetEdgeVertex(seamCellEdgeData, seamEdges.x), GetEdgeVertex(seamCellEdgeData, seamEdges.y));
+            uint2 seamCellVertices1 = uint2(GetEdgeVertex(seamCellEdgeData, seamEdges.z), GetEdgeVertex(seamCellEdgeData, seamEdges.w));
+            uint2 seamCellVertices = GetCellVertices(seamCellVertices0, seamCellVertices1);
+            for (uint j = 0; j < seamCellRatio1; j++)
+            {
+                int3 nextSeamCellPosition1 = initialSeamCellsPosition1 + j * seamCellOffset1;
+                int3x4 seamCellEdgeData1 = edges[GetSeamCellIndex(nextSeamCellPosition1)];
+                int nextSeamCellVertex = GetEdgeVertex(seamCellEdgeData1, seamEdges.z);
+                
+                bool flip = seamCellRatio == 1 ? IsChunkCellCornerOutside(cellEdgeData) : !IsSeamCellCornerOutside(seamCellEdgeData1);
+                if (all(nextSeamCellPosition1 == seamCellPosition1))
+                {
+                    nextSeamCellVertex = seamCellVertices.x + (seamCellVertices.x == 0) * seamCellVertices.y;
+                }
+                
+                TryAddTriangle(int3(chunkCellVertices1.y, nextSeamCellVertex, seamCellVertices1.y), flip);
+                TryAddTriangle(int3(chunkCellVertices1.y, nextChunkCellVertex, nextSeamCellVertex), flip);
+            }
+            
+            seamCellPosition1 += seamCellOffsets[0];
+            initialSeamCellsPosition1 += ((((i + 1) * seamChunkData.size) % seamChunkData1.size) == 0) * seamCellRatio1 * seamCellOffset1;
+        }
+    }
+}
+
+*/

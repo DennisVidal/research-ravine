@@ -1,0 +1,52 @@
+
+#pragma kernel CSMain
+
+#include "PerlinNoise.hlsl"
+
+
+RWTexture2D<float4> minimapTexture;
+
+float3 playerPosition;
+float playerDotRadius;
+uint resolution;
+float zoomLevel;
+
+float itemDotRadius;
+int itemCount;
+RWStructuredBuffer<float3> itemPositionBuffer;
+
+
+float4 mapColor;//= float4(0.0f, 0.8f, 0.0f, 1.0f);
+float4 mapBaseColor;//= float4(0.0f, 0.1f, 0.0f, 1.0f);
+float4 playerColor; //= float4(0.84f, 0.37f, 0.0f, 1.0f);
+float4 gridColor;//= float4(0.0f, 0.3f, 0.0f, 1.0f);
+float4 itemColor; //= float4(0.94f, 0.89f, 0.26f, 1.0f);
+
+float terrainWidthFactor;
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{    
+    float2 localImagePosition = id.xy - resolution * 0.5f;
+    float3 samplePosition = playerPosition;
+    samplePosition.xz += localImagePosition* zoomLevel;
+    
+    float terrainBase01 = (PerlinNoise(samplePosition * 0.001f) + PerlinNoise(samplePosition * 0.0023f) * 1.36f) * 0.42372881355f;
+    terrainBase01 = pow(1.0f - abs(terrainBase01), terrainWidthFactor); // 7.06f
+    
+    float4 color = any(abs(fmod(samplePosition.xz, 1000.0f)) < zoomLevel) ? gridColor : !(terrainBase01 < 0.9f) * mapColor + mapBaseColor;
+    
+    for (int i = 0; i < itemCount; i++)
+    {
+        float itemDistance = length(itemPositionBuffer[i].xz - samplePosition.xz) / zoomLevel;
+        if (itemDistance < itemDotRadius)
+        {
+            color = itemColor;
+            break;
+        }
+
+    }
+    
+    color = length(localImagePosition) > playerDotRadius ? color : playerColor;
+    minimapTexture[id.xy] = color;
+}

@@ -1,0 +1,62 @@
+#pragma kernel CSMain
+
+#include "Terrain.hlsl"
+
+RWTexture2D<float4> Result;
+float frequency;
+float threshhold;
+float threshhold2;
+float power;
+int octaves;
+bool invertNoise;
+float zCoord;
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    float3 pos = float3(id.x, zCoord, id.y) + 0.143f;
+    //float noise = 0.0f;
+    //
+    //float max = 0.0f;
+    //float freq = frequency;
+    //float amp = 1.0f;
+    //for (int i = 0; i < octaves; i++)
+    //{
+    //    noise += PerlinNoise(pos.xz * freq);
+    //    max += amp;
+    //    freq *= power;
+    //    amp *= 1;
+    //}
+    //noise /= max;
+    //
+    //
+    //noise = abs(noise);
+    //noise = pow(noise, threshhold);
+    //noise = pow(1.0f-noise, threshhold2);
+    //
+    ////noise = noise > threshhold ? 1.0f : ((noise < threshhold2) ? 0.0f : 0.5f);
+    //
+    //if (invertNoise)
+    //{
+    //    noise = 1.0f - noise;
+    //}
+    
+   // Result[id.xy] = (GetCustom(pos.xz) + 1.0f) * 0.5f;
+    
+    
+    
+    float noise = PerlinNoise(pos * 0.011f);
+    noise += PerlinNoise(pos * 0.02f) * 1.36f;
+    noise /= 2.36f;
+    noise = abs(noise);
+    //noise = pow(noise, threshhold);
+    noise = pow(1.0f - noise, power);
+    //noise = (noise * -2.0f) + 1.0f;
+    
+    
+    if (invertNoise)
+    {
+        noise = 1.0f - noise;
+    }
+    
+    Result[id.xy] = saturate((noise - threshhold) / (threshhold2 - threshhold));
+}

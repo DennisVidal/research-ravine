@@ -1,0 +1,39 @@
+=========================================================================================================
+The following sounds are released under the Creative Commons 0 License: https://creativecommons.org/publicdomain/zero/1.0/
+=========================================================================================================
+SandstormSound
+https://freesound.org/people/Zixem/sounds/69509/
+=====================
+BikeEngineSound
+https://freesound.org/people/MarlonHJ/sounds/242739/
+=====================
+DriveFireSound
+https://freesound.org/people/Sclolex/sounds/180501/
+Edited to make it loop
+=====================
+DrillRayBombStaticSound
+https://freesound.org/people/colorsCrimsonTears/sounds/547523/
+=====================
+DrillRayBombFiringSound
+https://freesound.org/people/V-ktor/sounds/435416/
+=====================
+TerrainImpactSound
+https://freesound.org/people/FilmmakersManual/sounds/522390/
+=====================
+WaterImpactSound
+https://freesound.org/people/Fission9/sounds/583348/
+=====================
+EnergyShieldSound
+https://freesound.org/people/cabled_mess/sounds/351450/
+=====================
+
+
+=========================================================================================================
+The following sounds are released in the Public Domain: https://creativecommons.org/licenses/publicdomain/
+=========================================================================================================
+Wilhelm Scream
+https://archive.org/details/WilhelmScreamSample
+=====================
+
+
+
