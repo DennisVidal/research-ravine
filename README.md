@@ -1,0 +1,3 @@
+# Research Ravine
+
+Research Ravine is the result of my master thesis about noise-based generation of 3D worlds for a VR flight simulation. The canyon-like terrain is therefore completely procedurally generated using an algorithm called [Dual Marching Cubes](https://www.researchgate.net/publication/4112407_Dual_Marching_Cubes "Nielson's Dual Marching Cubes Paper"). The player controls their virtual character through the use of an [Icaros](https://www.icaros.com/en/products/icaros-pro "Website of Icaros") system, allowing them to move by adjusting their center of gravity. A showcase can be found [here](https://dennisvidal.github.io/research-ravine/ "Website").
